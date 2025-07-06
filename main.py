@@ -6,10 +6,24 @@ import tempfile
 import requests
 import csv
 import re
+import psutil 
 from pdf2image import convert_from_path
 from PIL import Image
 import google.generativeai as genai
 from dotenv import load_dotenv
+from datetime import datetime
+
+
+# -------------- Add RAM Checking Helper ---------------
+def wait_if_ram_high(threshold=85, wait_time=5):
+    """Pause if RAM usage goes above threshold percentage."""
+    while True:
+        mem = psutil.virtual_memory()
+        if mem.percent >= threshold:
+            print(f"⚠️  High RAM usage detected: {mem.percent}%. Pausing for {wait_time}s...")
+            time.sleep(wait_time)
+        else:
+            break
 
 # --------------------- Load API Key ---------------------
 load_dotenv()
@@ -57,7 +71,7 @@ class PdfOcrProcessor:
             image.save(img_byte_arr, format='PNG')
             img_bytes = img_byte_arr.getvalue()
             prompt = [
-                "Extract all readable text from this image. Separate the extracted text into two sections with clear headers: 'English_Text:' and 'Khmer_Text:'. Only include text actually found in the image under each section. If a section is empty, just write 'None'.",
+                "Extract all readable text from this image. Separate the extracted text into two sections with clear headers: 'English_Text:' and 'Khmer_Text:'. Only include text actually found in the image under each section. If a section is empty, just write ' '.",
                 {
                     "data": img_bytes,
                     "mime_type": "image/png"
@@ -67,9 +81,17 @@ class PdfOcrProcessor:
             print(f"🔍 OCR successful on page {page_number}")
             return response.text
         except Exception as e:
-            error_msg = f"[Error processing page {page_number}]: {str(e)}"
+            error_text = str(e)
+            if "429" in error_text or "quota" in error_text.lower():
+                print("❌ Rate limit exceeded — Gemini daily quota reached.")
+                print("🔁 Stopping further OCR processing. Try again tomorrow or upgrade your API tier.\n")
+                # Raise custom signal or return sentinel value to abort further processing
+                raise RuntimeError("Rate limit exceeded. Aborting OCR processing.")
+            
+            error_msg = f"[Error processing page {page_number}]: {error_text}"
             print(f"❌ {error_msg}")
             return error_msg
+
 
     def extract_english_khmer(self, text):
         # Remove boilerplate lines Gemini sometimes returns
@@ -83,40 +105,63 @@ class PdfOcrProcessor:
             filtered_lines.append(line)
         cleaned_text = "\n".join(filtered_lines)
 
-        # Default to None if not found
-        english_text = None
-        khmer_text = None
+        # Default to empty if not found
+        english_text = ""
+        khmer_text = ""
 
         eng_match = re.search(r"English_Text:(.*?)(Khmer_Text:|$)", cleaned_text, re.DOTALL | re.IGNORECASE)
         khm_match = re.search(r"Khmer_Text:(.*)", cleaned_text, re.DOTALL | re.IGNORECASE)
 
         if eng_match:
-            english_text = eng_match.group(1).strip()
-            if english_text.lower() == "none":
-                english_text = ""
+            raw_eng = eng_match.group(1).strip()
+            if raw_eng.lower() != "none":
+                english_text = raw_eng
+
         if khm_match:
-            khmer_text = khm_match.group(1).strip()
-            if khmer_text.lower() == "none":
-                khmer_text = ""
+            raw_khm = khm_match.group(1).strip()
+            if raw_khm.lower() != "none":
+                khmer_text = raw_khm
 
         return english_text, khmer_text
 
-    def process_multiple_pdfs_to_csv(self, pdf_urls, output_csv="all_results.csv", headers=None):
+    def process_multiple_pdfs_to_csv(self, pdf_urls, output_csv=None, headers=None):
         all_rows = []
         row_id = 1
+
+        # Generate output filename if not provided
+        if output_csv is None:
+            timestamp = datetime.now().strftime("%d_%m_%H%M%S")
+            output_dir = "output"
+            os.makedirs(output_dir, exist_ok=True)
+            output_csv = os.path.join(output_dir, f"scrape_content_{timestamp}.csv")
+
         for idx, url in enumerate(pdf_urls, start=1):
-            print(f"\n📁 Processing file {idx}/{len(pdf_urls)}: {url}")
+            print(f"📁 Processing file {idx}/{len(pdf_urls)}: {url}")
+
             with tempfile.TemporaryDirectory() as temp_dir:
                 pdf_path = os.path.join(temp_dir, f"file_{idx}.pdf")
                 if not self.download_pdf(url, pdf_path, headers=headers):
                     print(f"Skipping file {idx} due to download failure.")
                     continue
+
                 images = self.convert_pdf_to_images(pdf_path)
                 if not images:
                     print("Aborting due to PDF conversion failure.")
                     continue
+
                 for i, page_img in enumerate(images, start=1):
-                    page_text = self.ocr_image(page_img, i)
+
+                    # ------------------- RAM CHECK -------------------
+                    wait_if_ram_high(threshold=85, wait_time=7) # <--- Add before each page OCR
+
+                    try:
+                        page_text = self.ocr_image(page_img, i)
+                    except RuntimeError as quota_error:
+                        print(f"⛔ OCR halted: {quota_error}")
+                        # Immediately write what has been processed so far
+                        break  # exits the inner loop, continues to saving
+                    
+
                     english_text, khmer_text = self.extract_english_khmer(page_text)
 
                     # Split into lines and clean
@@ -132,7 +177,13 @@ class PdfOcrProcessor:
                             continue
                         all_rows.append([row_id, eng, khm])
                         row_id += 1
-                    time.sleep(1)  # Rate limiting
+
+                    # --- Clean up memory ---
+                    del page_img
+                    import gc; gc.collect()
+
+                    time.sleep(1)  # Still useful for rate limiting
+
         # Write all to CSV at the end
         try:
             with open(output_csv, "w", encoding="utf-8", newline="") as f:
@@ -145,32 +196,26 @@ class PdfOcrProcessor:
 
 # --------------------- Input Handling ---------------------
 def collect_pdf_urls():
-    print("Enter PDF URLs one per line.")
-    print("Press Enter on a blank line to start processing.")
-    print("Press Enter without typing anything at the start to exit.\n")
     pdf_urls = []
-    first_input = input(" > ").strip()
-    if first_input == "":
-        print("No input received. Exiting application.")
-        return []
-    if first_input.lower() == "exit":
-        print("Exiting application.")
-        return []
-    if first_input.lower().endswith(".pdf"):
-        pdf_urls.append(first_input)
-    else:
-        print("Invalid URL: must end with .pdf")
+    print("Enter PDF URLs (must end with .pdf).")
+    print("Press Enter on an empty line to start processing:\n")
+
     while True:
-        line = input("Enter another URL (or press Enter to process): ").strip()
-        if line.lower() == "exit":
-            print("Exiting application.")
-            return []
-        if line == "":
+        url_input = input("  > ").strip()
+        if not url_input:
+            print("\nStarting PDF processing...\n")
             break
-        if line.lower().endswith(".pdf"):
-            pdf_urls.append(line)
-        else:
-            print("Invalid URL: must end with .pdf")
+
+        if not url_input.lower().endswith(".pdf"):
+            print("❌ Invalid URL: must end with .pdf")
+            continue
+
+        pdf_urls.append(url_input)
+
+    if not pdf_urls:
+        print("No valid PDF URLs provided. Exiting.")
+        return []
+
     return pdf_urls
 
 # --------------------- Main Application ---------------------
@@ -178,6 +223,7 @@ def main():
     if not API_KEY:
         print("❌ API key not found. Please set GENAI_API_KEY in your .env file.")
         sys.exit(1)
+
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -186,16 +232,27 @@ def main():
         )
     }
     processor = PdfOcrProcessor(API_KEY)
-    while True:
-        pdf_urls = collect_pdf_urls()
-        if not pdf_urls:
-            break
-        processor.process_multiple_pdfs_to_csv(
-            pdf_urls,
-            output_csv="all_results.csv",
-            headers=headers
-        )
-        print("\n✅ Batch processed. Restarting...\n")
+
+    pdf_urls = collect_pdf_urls()
+    if not pdf_urls:
+        print("No PDFs to process. Exiting.")
+        return
+    
+    start_time = datetime.now()
+    print(f"\n🕒 Started at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🔗 {len(pdf_urls)} PDF link(s) to process...\n")
+        
+    processor.process_multiple_pdfs_to_csv(
+        pdf_urls,
+        headers=headers
+    )
+
+    end_time = datetime.now()
+    duration_seconds = (end_time - start_time).total_seconds()
+
+    print(f"\n✅ PDF processing complete.")
+    print(f"🕓 Finished at {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"⏱️ Total processing time: {duration_seconds:.2f} seconds")
 
 # --------------------- Entry Point ---------------------
 if __name__ == "__main__":

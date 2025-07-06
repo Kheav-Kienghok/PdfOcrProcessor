@@ -7,7 +7,7 @@ import requests
 import csv
 import re
 import psutil 
-from pdf2image import convert_from_path
+from pdf2image import convert_from_path, pdfinfo_from_path
 from PIL import Image
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -144,18 +144,39 @@ class PdfOcrProcessor:
                     print(f"Skipping file {idx} due to download failure.")
                     continue
 
+                # Get number of pages in the PDF
+                info = pdfinfo_from_path(pdf_path)
+                max_pages = info["Pages"]
+
+                if max_pages > 20:
+                    print(f"⏩ Skipping '{url}' ({max_pages} pages) — exceeds 20 page limit.")
+                    continue  # Skip to next PDF
+
                 images = self.convert_pdf_to_images(pdf_path)
                 if not images:
                     print("Aborting due to PDF conversion failure.")
                     continue
 
-                for i, page_img in enumerate(images, start=1):
+                for i in range(1, max_pages + 1):
 
                     # ------------------- RAM CHECK -------------------
                     wait_if_ram_high(threshold=85, wait_time=7) # <--- Add before each page OCR
 
+                    # Convert only the current page to image (not the whole PDF)
                     try:
-                        page_text = self.ocr_image(page_img, i)
+                        images = self.convert_pdf_to_images(pdf_path, dpi=300, first_page=i, last_page=i)
+                        if not images:
+                            print(f"❌ Failed to convert page {i} to image.")
+                            continue
+                        
+                        page_img = images[0]
+
+                        try:
+                            page_text = self.ocr_image(page_img, i)
+                        except RuntimeError as quota_error:
+                            print(f"⛔ OCR halted: {quota_error}")
+                            break
+
                     except RuntimeError as quota_error:
                         print(f"⛔ OCR halted: {quota_error}")
                         # Immediately write what has been processed so far

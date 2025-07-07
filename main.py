@@ -56,9 +56,14 @@ class PdfOcrProcessor:
             print(f"❌ Exception during PDF download: {e}")
             return False
 
-    def convert_pdf_to_images(self, pdf_path: str, dpi: int = 300):
+    def convert_pdf_to_images(self, pdf_path: str, dpi: int = 300, first_page: int = None, last_page: int = None):
         try:
-            images = convert_from_path(pdf_path, dpi=dpi)
+            images = convert_from_path(
+                pdf_path,
+                dpi=dpi,
+                first_page=first_page,
+                last_page=last_page
+            )
             print(f"✅ Converted PDF '{pdf_path}' to {len(images)} image(s)")
             return images
         except Exception as e:
@@ -112,6 +117,16 @@ class PdfOcrProcessor:
         eng_match = re.search(r"English_Text:(.*?)(Khmer_Text:|$)", cleaned_text, re.DOTALL | re.IGNORECASE)
         khm_match = re.search(r"Khmer_Text:(.*)", cleaned_text, re.DOTALL | re.IGNORECASE)
 
+        # max_lines = max(len(eng_lines), len(khm_lines))
+        # for line_num in range(max_lines):
+        #     eng = eng_lines[line_num] if line_num < len(eng_lines) else ""
+        #     khm = khm_lines[line_num] if line_num < len(khm_lines) else ""
+        #     # Skip if both lines are short (≤3 after clean)
+        #     if len(eng) <= 3 and len(khm) <= 3:
+        #         continue
+        #     all_rows.append([row_id, eng, khm])
+        #     row_id += 1
+
         if eng_match:
             raw_eng = eng_match.group(1).strip()
             if raw_eng.lower() != "none":
@@ -123,6 +138,16 @@ class PdfOcrProcessor:
                 khmer_text = raw_khm
 
         return english_text, khmer_text
+
+    def save_rows_to_csv(self, rows, output_csv):
+        try:
+            with open(output_csv, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["ID", "English_Text", "Khmer_Text"])
+                writer.writerows(rows)
+            print(f"\n✅ All results saved to '{output_csv}'")
+        except Exception as e:
+            print(f"❌ Failed to save OCR output to CSV: {e}")
 
     def process_multiple_pdfs_to_csv(self, pdf_urls, output_csv=None, headers=None):
         all_rows = []
@@ -152,11 +177,6 @@ class PdfOcrProcessor:
                     print(f"⏩ Skipping '{url}' ({max_pages} pages) — exceeds 20 page limit.")
                     continue  # Skip to next PDF
 
-                images = self.convert_pdf_to_images(pdf_path)
-                if not images:
-                    print("Aborting due to PDF conversion failure.")
-                    continue
-
                 for i in range(1, max_pages + 1):
 
                     # ------------------- RAM CHECK -------------------
@@ -174,13 +194,17 @@ class PdfOcrProcessor:
                         try:
                             page_text = self.ocr_image(page_img, i)
                         except RuntimeError as quota_error:
-                            print(f"⛔ OCR halted: {quota_error}")
-                            break
+                            # Save progress and exit
+                            self.save_rows_to_csv(all_rows, output_csv)
+                            print("👋 Exiting due to API quota exhaustion. Partial results saved.")
+                            return
 
                     except RuntimeError as quota_error:
                         print(f"⛔ OCR halted: {quota_error}")
-                        # Immediately write what has been processed so far
-                        break  # exits the inner loop, continues to saving
+                        # Save progress and exit
+                        self.save_rows_to_csv(all_rows, output_csv)
+                        print("👋 Exiting due to API quota exhaustion. Partial results saved.")
+                        return
                     
 
                     english_text, khmer_text = self.extract_english_khmer(page_text)
@@ -189,15 +213,15 @@ class PdfOcrProcessor:
                     eng_lines = [clean_line(line) for line in english_text.splitlines() if clean_line(line)]
                     khm_lines = [clean_line(line) for line in khmer_text.splitlines() if clean_line(line)]
 
-                    max_lines = max(len(eng_lines), len(khm_lines))
-                    for line_num in range(max_lines):
-                        eng = eng_lines[line_num] if line_num < len(eng_lines) else ""
-                        khm = khm_lines[line_num] if line_num < len(khm_lines) else ""
-                        # Skip if both lines are short (≤3 after clean)
-                        if len(eng) <= 3 and len(khm) <= 3:
-                            continue
-                        all_rows.append([row_id, eng, khm])
-                        row_id += 1
+                    for eng_line in eng_lines:
+                        if len(eng_line) > 3:
+                            all_rows.append([row_id, eng_line, ""])
+                            row_id += 1
+
+                    for khm_line in khm_lines:
+                        if len(khm_line) > 3:
+                            all_rows.append([row_id, "", khm_line])
+                            row_id += 1
 
                     # --- Clean up memory ---
                     del page_img
@@ -205,22 +229,15 @@ class PdfOcrProcessor:
 
                     time.sleep(1)  # Still useful for rate limiting
 
-        # Write all to CSV at the end
-        try:
-            with open(output_csv, "w", encoding="utf-8", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(["ID", "English_Text", "Khmer_Text"])
-                writer.writerows(all_rows)
-            print(f"\n✅ All results saved to '{output_csv}'")
-        except Exception as e:
-            print(f"❌ Failed to save OCR output to CSV: {e}")
+        # Write all to CSV at the end (if not already written due to quota)
+        self.save_rows_to_csv(all_rows, output_csv)
 
 # --------------------- Input Handling ---------------------
 def collect_pdf_urls():
     pdf_urls = []
     print("Enter PDF URLs (must end with .pdf).")
-    print("Press Enter on an empty line to start processing:\n")
-
+    print("Press Enter on an empty line to start processing.")
+    print("Example: https://mfaic.gov.kh/files/uploads/0YS4PAUIQFCD/សេចក្តីជូនដំណឹង_ស្តីពីកាដេញថ្លៃការផ្គត់ផ្គង់ប្រងឥន្ធនៈ.pdf\n")
     while True:
         url_input = input("  > ").strip()
         if not url_input:
@@ -252,7 +269,7 @@ def main():
             "Chrome/115.0.0.0 Safari/537.36"
         )
     }
-    processor = PdfOcrProcessor(API_KEY)
+    processor = PdfOcrProcessor(API_KEY)  
 
     pdf_urls = collect_pdf_urls()
     if not pdf_urls:

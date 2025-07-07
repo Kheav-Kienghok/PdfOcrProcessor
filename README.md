@@ -1,65 +1,75 @@
-# PDF Downloader and OCR Extractor
+# 📄 PDF Downloader and OCR Extractor
 
-## Project Description
+## 🔍 Project Overview
 
-This project automates the extraction of text from online PDF files.  
-It collects URLs ending with `.pdf`, downloads the PDFs to your local machine, and converts each page to images. The images are then sent to the Gemini API for OCR (Optical Character Recognition) using a specific prompt to receive the extracted data in a structured, easy-to-use format. The final results are saved into a CSV file for easy access and analysis.
+This project automates the extraction of **Khmer** and **English** text from online PDF files using Google's Gemini models.
 
-**To ensure your computer remains stable during large processing jobs, the project uses `psutil` to monitor memory usage.** If RAM usage becomes too high, the process will automatically pause, clear up memory, and then continue—helping to prevent your machine from being killed due to excessive resource usage.
+It uses a **two-model pipeline**:
 
-**Large PDFs are automatically skipped (configurable page limit) to further protect your resources.**  
-The script processes each PDF page-by-page, never loading the entire document into memory at once.
+1. **Detection Stage**  
+   A lightweight model (`gemini-2.5-flash` or `gemini-pro`) analyzes each PDF page (as an image) to determine whether it contains **Khmer**, **English**, **Both**, or **neither**.  
+   This pre-check helps avoid wasting API quota on irrelevant content (e.g., pages in other languages like Hindi or Thai), conserving usage of the more expensive extraction model.
 
+2. **Extraction Stage**  
+   If the page contains Khmer or English, it is passed to a high-accuracy OCR model—`gemini-1.5-flash` or `gemini-2.0-flash`—which extracts and organizes readable text into two clearly labeled sections:
+   - `English_Text:`
+   - `Khmer_Text:`
 
-> **Note:** Please use the `"gemini-1.5-flash"` model as it is especially strong for OCR in Khmer language.  
-> It allows only 50 requests per day.
+To ensure your system remains stable, the script uses `psutil` to monitor memory usage. When RAM usage exceeds a defined threshold, the script automatically pauses to prevent crashes or overload.
+
+Additionally:
+- PDFs exceeding a configurable page limit (default: 20 pages) are skipped to preserve system resources.
+- Each page is processed **individually**, never loading an entire PDF into memory at once.
+
+> ⚠️ **Note:**  
+> `gemini-1.5-flash` and `gemini-2.0-flash` is highly accurate for **Khmer OCR**, but it is limited to **50 requests per day** on the free tier.  
+> Using a lightweight detection model helps reserve this limited quota for meaningful content only.
+
 
 ---
 
-## Features
+## ✅ Features
 
-- **Download PDFs from user-provided URLs**
-- **Converts PDF pages to images on the fly**
-- **OCR extraction with Gemini API, supporting both English and Khmer text**
-- **Results saved to a CSV file for further processing or analysis**
-- **Automatic memory usage monitoring and protection**
-- **Skips large PDFs that exceed your set page limit**
-- **Simple command-line workflow**
+- 🔗 Download PDFs from user-provided URLs
+- 📄 Convert PDF pages to images on-the-fly
+- 🤖 Use **Gemini OCR** to extract both **English and Khmer** text
+- 📦 Save extracted data into structured CSV format
+- 💾 Automatically monitor and manage system RAM
+- 🚫 Skip large PDFs that exceed your configured page limit
+- 🔄 Process one page at a time to reduce memory usage
+- 🖥️ Simple and interactive command-line workflow
 
 ---
 
-## Sample and Results
+## 📥 Sample Input (PDF)
+
+[Click here to view the sample PDF](https://mfaic.gov.kh/files/uploads/0YS4PAUIQFCD/សេចក្តីជូនដំណឹង_ស្តីពីកាដេញថ្លៃការផ្គត់ផ្គង់ប្រងឥន្ធនៈ.pdf)
+
+---
+
+## 🧠 Gemini OCR Results (Comparison)
 
 <div align="center">
-  <div style="display: flex; justify-content: center; gap: 20px; flex-wrap: wrap; max-width: 900px; margin: auto;">
 
-  <div style="text-align: center;">
-    <h3>Sample Input</h3>
-    <embed 
-        src="https://mfaic.gov.kh/files/uploads/0YS4PAUIQFCD/សេចក្តីជូនដំណឹង_ស្តីពីកាដេញថ្លៃការផ្គត់ផ្គង់ប្រងឥន្ធនៈ.pdf" 
-        type="application/pdf" 
-        width="400px" 
-        height="500px"
-        style="border: 1px solid #ddd; border-radius: 8px;"
-    >
+<table>
+  <tr>
+    <th style="text-align: center;">Gemini 1.5 Flash</th>
+    <th style="text-align: center;">Gemini 2.0 Flash</th>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="images/result-1.5-flash.png" alt="Gemini 1.5 Flash OCR Result" width="300">
+    </td>
+    <td align="center">
+      <img src="images/result-2.0-flash.png" alt="Gemini 2.0 Flash OCR Result" width="300">
+    </td>
+  </tr>
+</table>
 
-  </div>
-
-  <div style="text-align: center;">
-    <h3>OCR Result</h3>
-    <img 
-      src="images/result.png" 
-      alt="OCR extraction result showing structured data" 
-      style="width: 400px; height: 500px; object-fit: cover; border: 1px solid #ddd; border-radius: 8px; margin: 10px auto; display: block;"
-    >
-  </div>
-
-  </div>
 </div>
 
-
-
 ---
+
 
 ## Requirements
 
@@ -106,6 +116,24 @@ python main.py
 - You will be prompted to enter PDF URLs one by one (must end with `.pdf`).
 - When you have entered all your URLs, press **Enter** on an empty line to start processing.
 - The extracted text will be saved as a CSV file in the `output/` directory.
+
+### 🔧 Optional Arguments
+
+| Argument    | Description                                                  | Example                              |
+|-------------|--------------------------------------------------------------|--------------------------------------|
+| `--model`   | Specify Gemini OCR model (`gemini-1.5-flash` or `gemini-2.0-flash`) | `--model gemini-2.0-flash`           |
+
+---
+
+### 📌 Examples
+
+```bash
+# Use default model (gemini-1.5-flash)
+python main.py
+
+# Use Gemini 2.0 Flash model
+python main.py --model gemini-2.0-flash
+```
 
 ---
 

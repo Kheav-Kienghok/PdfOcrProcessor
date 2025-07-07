@@ -12,6 +12,8 @@ from PIL import Image
 import google.generativeai as genai
 from dotenv import load_dotenv
 from datetime import datetime
+import argparse
+
 
 
 # -------------- Add RAM Checking Helper ---------------
@@ -36,10 +38,11 @@ def clean_line(line):
 
 # --------------------- Processor Class ---------------------
 class PdfOcrProcessor:
-    def __init__(self, api_key: str, model_name: str = "gemini-1.5-flash"):
+    def __init__(self, api_key: str, extraction_model: str = "gemini-1.5-flash"):
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(model_name)
-        print(f"🔧 Initialized Gemini model '{model_name}'")
+        self.extraction_model = genai.GenerativeModel(extraction_model)
+        self.detection_model = genai.GenerativeModel("models/gemini-2.5-pro")
+        print(f"🔧 Initialized Extraction model '{extraction_model}' and Detection model 'gemini-pro'")
 
     def download_pdf(self, url: str, filename: str, headers: dict = None) -> bool:
         try:
@@ -69,6 +72,30 @@ class PdfOcrProcessor:
         except Exception as e:
             print(f"❌ Error converting PDF to images: {e}")
             return []
+            
+    def detect_languages_in_image(self, image: Image.Image) -> str:
+        """Detect if the image contains Khmer, English, both, or none."""
+        try:
+            img_byte_arr = io.BytesIO()
+            image.save(img_byte_arr, format='PNG')
+            img_bytes = img_byte_arr.getvalue()
+
+            prompt = [
+                "This image may contain text in English and/or Khmer. Analyze the image and return ONLY one of the following words:\n\n- Khmer\n- English\n- Both\n- None\n\nDo not include anything else in the response.",
+                {
+                    "data": img_bytes,
+                    "mime_type": "image/png"
+                }
+            ]
+
+            response = self.detection_model.generate_content(prompt)
+            detected = response.text.strip().capitalize()
+            print(f"🧭 Language detected: {detected}")
+            return detected
+        except Exception as e:
+            print(f"❌ Language detection failed: {e}")
+            return "None"
+
 
     def ocr_image(self, image: Image.Image, page_number: int) -> str:
         try:
@@ -82,7 +109,7 @@ class PdfOcrProcessor:
                     "mime_type": "image/png"
                 }
             ]
-            response = self.model.generate_content(prompt)
+            response = self.extraction_model.generate_content(prompt)
             print(f"🔍 OCR successful on page {page_number}")
             return response.text
         except Exception as e:
@@ -192,7 +219,14 @@ class PdfOcrProcessor:
                         page_img = images[0]
 
                         try:
+                            detected_lang = self.detect_languages_in_image(page_img)
+
+                            if detected_lang not in ["English", "Khmer", "Both"]:
+                                print(f"⛔ Skipping page {i} — Detected language: '{detected_lang}'")
+                                continue
+
                             page_text = self.ocr_image(page_img, i)
+
                         except RuntimeError as quota_error:
                             # Save progress and exit
                             self.save_rows_to_csv(all_rows, output_csv)
@@ -258,6 +292,21 @@ def collect_pdf_urls():
 
 # --------------------- Main Application ---------------------
 def main():
+
+    parser = argparse.ArgumentParser(
+        description="Download PDFs, extract Khmer/English text via Gemini OCR, and save to CSV."
+    )
+
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="gemini-1.5-flash",
+        choices=["gemini-1.5-flash", "gemini-2.0-flash"],
+        help="Specify the Gemini model for OCR extraction."
+    )
+
+    args = parser.parse_args()
+
     if not API_KEY:
         print("❌ API key not found. Please set GENAI_API_KEY in your .env file.")
         sys.exit(1)
@@ -269,7 +318,9 @@ def main():
             "Chrome/115.0.0.0 Safari/537.36"
         )
     }
-    processor = PdfOcrProcessor(API_KEY)  
+
+    # Initialize processor with selected model
+    processor = PdfOcrProcessor(API_KEY, extraction_model=args.model)
 
     pdf_urls = collect_pdf_urls()
     if not pdf_urls:

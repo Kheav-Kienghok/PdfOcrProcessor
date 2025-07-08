@@ -11,21 +11,35 @@ from pdf2image import convert_from_path, pdfinfo_from_path
 from PIL import Image
 import google.generativeai as genai
 from dotenv import load_dotenv
+from tqdm import tqdm
 from datetime import datetime
 import argparse
 
+# ------------------ Constants ------------------
+DEFAULT_MODEL = "gemini-1.5-flash"
+MAX_PAGES_ALLOWED = 20
+RAM_THRESHOLD = 85
+WAIT_TIME = 7
+OCR_SLEEP = 1
+# OUTPUT_DIR = "output"
+# SKIPPED_LOG = os.path.join(OUTPUT_DIR, "skipped_pages.log")
 
 
-# -------------- Add RAM Checking Helper ---------------
-def wait_if_ram_high(threshold=85, wait_time=5):
-    """Pause if RAM usage goes above threshold percentage."""
+# ------------------ RAM Management ------------------
+def wait_if_ram_high(threshold=RAM_THRESHOLD, wait_time=WAIT_TIME):
     while True:
-        mem = psutil.virtual_memory()
-        if mem.percent >= threshold:
-            print(f"⚠️  High RAM usage detected: {mem.percent}%. Pausing for {wait_time}s...")
+        if psutil.virtual_memory().percent >= threshold:
+            print(f"⚠️ High RAM usage: {psutil.virtual_memory().percent}%. Pausing {wait_time}s...")
             time.sleep(wait_time)
         else:
             break
+
+# Decorator for RAM-safe calls
+def ram_safe(func):
+    def wrapper(*args, **kwargs):
+        wait_if_ram_high()
+        return func(*args, **kwargs)
+    return wrapper
 
 # --------------------- Load API Key ---------------------
 load_dotenv()
@@ -38,10 +52,9 @@ def clean_line(line):
 
 # --------------------- Processor Class ---------------------
 class PdfOcrProcessor:
-    def __init__(self, api_key: str, extraction_model: str = "gemini-1.5-flash"):
+    def __init__(self, api_key: str, extraction_model: str = DEFAULT_MODEL):
         genai.configure(api_key=api_key)
         self.extraction_model = genai.GenerativeModel(extraction_model)
-        self.detection_model = genai.GenerativeModel("models/gemini-2.5-pro")
         print(f"🔧 Initialized Extraction model '{extraction_model}' and Detection model 'gemini-pro'")
 
     def download_pdf(self, url: str, filename: str, headers: dict = None) -> bool:
@@ -72,31 +85,43 @@ class PdfOcrProcessor:
         except Exception as e:
             print(f"❌ Error converting PDF to images: {e}")
             return []
-            
+
+    @ram_safe  
     def detect_languages_in_image(self, image: Image.Image) -> str:
         """Detect if the image contains Khmer, English, both, or none."""
-        try:
-            img_byte_arr = io.BytesIO()
-            image.save(img_byte_arr, format='PNG')
-            img_bytes = img_byte_arr.getvalue()
+        models_to_try = ["models/gemini-2.5-pro", "models/gemini-2.5-flash"]
 
-            prompt = [
-                "This image may contain text in English and/or Khmer. Analyze the image and return ONLY one of the following words:\n\n- Khmer\n- English\n- Both\n- None\n\nDo not include anything else in the response.",
-                {
-                    "data": img_bytes,
-                    "mime_type": "image/png"
-                }
-            ]
+        img_byte_arr = io.BytesIO()
+        image.save(img_byte_arr, format='PNG')
+        img_bytes = img_byte_arr.getvalue()
+        
+        prompt = [
+            "This image may contain text in English and/or Khmer. Analyze the image and return ONLY one of the following words:\n\n- Khmer\n- English\n- Both\n- None\n\nDo not include anything else in the response.",
+            {
+                "data": img_bytes,
+                "mime_type": "image/png"
+            }
+        ]
 
-            response = self.detection_model.generate_content(prompt)
-            detected = response.text.strip().capitalize()
-            print(f"🧭 Language detected: {detected}")
-            return detected
-        except Exception as e:
-            print(f"❌ Language detection failed: {e}")
-            return "None"
+        for model_name in models_to_try:
+            try:
+                self.detection_model = genai.GenerativeModel(model_name)
+                response = self.detection_model.generate_content(prompt)
+                detected = response.text.strip().capitalize()
+                print(f"🧭 Language detected using {model_name}: {detected}")
+                return detected
+            except Exception as e:
+                error_text = str(e)
+                if "429" in error_text or "quota" in error_text.lower():
+                    print(f"❌ Quota exceeded on model {model_name}, trying next fallback model...")
+                    continue  # Try next model in list
+                print(f"❌ Language detection failed: {e}")
+                return "None"
+        print("❌ All detection models exhausted or failed.")
+        return "None"
 
 
+    @ram_safe
     def ocr_image(self, image: Image.Image, page_number: int) -> str:
         try:
             img_byte_arr = io.BytesIO()
@@ -200,14 +225,15 @@ class PdfOcrProcessor:
                 info = pdfinfo_from_path(pdf_path)
                 max_pages = info["Pages"]
 
-                if max_pages > 20:
+                if max_pages > MAX_PAGES_ALLOWED:
                     print(f"⏩ Skipping '{url}' ({max_pages} pages) — exceeds 20 page limit.")
                     continue  # Skip to next PDF
 
-                for i in range(1, max_pages + 1):
+                # for i in range(1, max_pages + 1):
+                for i in tqdm(range(1, max_pages + 1), desc=f"Processing PDF {idx}/{len(pdf_urls)} pages"):
 
                     # ------------------- RAM CHECK -------------------
-                    wait_if_ram_high(threshold=85, wait_time=7) # <--- Add before each page OCR
+                    wait_if_ram_high(threshold=RAM_THRESHOLD, wait_time=WAIT_TIME) # <--- Add before each page OCR
 
                     # Convert only the current page to image (not the whole PDF)
                     try:
@@ -261,7 +287,7 @@ class PdfOcrProcessor:
                     del page_img
                     import gc; gc.collect()
 
-                    time.sleep(1)  # Still useful for rate limiting
+                    time.sleep(OCR_SLEEP)  # Still useful for rate limiting
 
         # Write all to CSV at the end (if not already written due to quota)
         self.save_rows_to_csv(all_rows, output_csv)
